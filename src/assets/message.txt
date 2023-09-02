@@ -1,0 +1,655 @@
+import { HttpContextContract } from '@ioc:Adonis/Core/HttpContext'
+import SequenceController from './SequenceController'
+import Nfse from 'App/Models/Nfse'
+import axios from 'axios'
+import Funcionario from 'App/Models/Funcionario'
+import Empresa from 'App/Models/Empresa'
+import Upload from 'App/Models/Upload'
+import { DateTime } from 'luxon'
+import NothosPrimeCertificado from 'App/Models/NothosPrimeCertificado'
+
+export default class NfseController {
+  public async index({ response, request, auth }: HttpContextContract): Promise<void> {
+    const localParams = request.qs()
+    const allCompanyFormatted: number[] = []
+    const sort = JSON.parse(localParams.sort).sort ? JSON.parse(localParams.sort).sort : 'desc'
+
+    const field = JSON.parse(localParams.sort).field
+      ? JSON.parse(localParams.sort).field
+      : 'created_at'
+
+    const statusFormated = []
+    let page = 1
+    let rowsPerPage = 25
+
+    for (const element of JSON.parse(localParams.status).value) {
+      statusFormated.push(`'%${element}%'`)
+    }
+
+    try {
+      page = JSON.parse(localParams.pagination).page
+    } catch (error) {
+      page = 1
+    }
+
+    try {
+      rowsPerPage = JSON.parse(localParams.pagination).rowsPerPage
+    } catch (error) {
+      rowsPerPage = 25
+    }
+
+    const company = await Funcionario.query()
+      .where('id', auth.user.funcionario_id)
+      .select('empresa_id')
+      .first()
+    if (!company) {
+      return response.badRequest(
+        'OCORREU UM ERRO AO TENTAR ENCONTRAR A EMPRESA NA QUAL O USUÁRIO LOGADO PERTENCE'
+      )
+    }
+
+    const group = await Empresa.query().where('id', company.empresa_id).select('grupo_id').first()
+    if (!group) {
+      return response.badRequest(
+        'OCORREU UM ERRO AO TENTAR ENCONTRAR O GRUPO NA QUAL O USUÁRIO LOGADO PERTENCE'
+      )
+    }
+
+    const allCompany = await Empresa.query().where('grupo_id', group.grupo_id).select('id')
+    if (!allCompany) {
+      return response.badRequest('OCORREU UM ERRO')
+    }
+
+    for (let i = 0; i < allCompany.length; i++) {
+      allCompanyFormatted.push(allCompany[i].id)
+    }
+
+    const data = await Nfse.query()
+      .whereIn('emissora_id', allCompanyFormatted)
+      .preload('cliente')
+      .preload('emissora')
+      .preload('servico_tipo')
+      .if(
+        JSON.parse(localParams.code).valueMin && JSON.parse(localParams.code).valueMax,
+        (subQuery) => {
+          subQuery.whereBetween('codigo', [
+            JSON.parse(localParams.code).valueMin,
+            JSON.parse(localParams.code).valueMax,
+          ])
+        }
+      )
+      .if(JSON.parse(localParams.description_service).value, (qryEmpresa) => {
+        qryEmpresa.whereRaw(
+          `unaccent(servico_descricao) ilike unaccent('%${
+            JSON.parse(localParams.description_service).value
+          }%')`
+        )
+      })
+      .if(JSON.parse(localParams.lot).value, (qryEmpresa) => {
+        qryEmpresa.whereRaw(
+          `unaccent(numero_lote) ilike unaccent('%${JSON.parse(localParams.lot).value}%')`
+        )
+      })
+      .if(JSON.parse(localParams.lot_protocol).value, (qryEmpresa) => {
+        qryEmpresa.whereRaw(
+          `unaccent(protocolo_lote) ilike unaccent('%${
+            JSON.parse(localParams.lot_protocol).value
+          }%')`
+        )
+      })
+      .if(JSON.parse(localParams.code_verification).value, (qryEmpresa) => {
+        qryEmpresa.whereRaw(
+          `unaccent(codigo_verificacao) ilike unaccent('%${
+            JSON.parse(localParams.code_verification).value
+          }%')`
+        )
+      })
+      .if(
+        JSON.parse(localParams.created_at).dateInit && JSON.parse(localParams.created_at).dateEnd,
+        (subQuery) => {
+          subQuery.whereBetween('created_at', [
+            JSON.parse(localParams.created_at).dateInit,
+            JSON.parse(localParams.created_at).dateEndCurrent,
+          ])
+        }
+      )
+      .if(
+        JSON.parse(localParams.issue_date).dateInit && JSON.parse(localParams.issue_date).dateEnd,
+        (subQuery) => {
+          subQuery.whereBetween('data_emissao', [
+            JSON.parse(localParams.issue_date).dateInit,
+            JSON.parse(localParams.issue_date).dateEndCurrent,
+          ])
+        }
+      )
+      .if(JSON.parse(localParams.description_service).value, (qryEmpresa) => {
+        qryEmpresa.whereRaw(
+          `unaccent(servico_descricao) ilike unaccent('%${
+            JSON.parse(localParams.description_service).value
+          }%')`
+        )
+      })
+      .if(JSON.parse(localParams.status).value, (subQuery) => {
+        subQuery.whereRaw(`status ilike ANY (array[${statusFormated}])`)
+      })
+      .if(JSON.parse(localParams.service_iss_font).value, (qryEmpresa) => {
+        qryEmpresa.where('servico_iss_retido_fonte', JSON.parse(localParams.service_iss_font).value)
+      })
+      .if(JSON.parse(localParams.company_issuer).value, (qryCompany) => {
+        qryCompany.whereHas('emissora', (qryContratos) => {
+          qryContratos.where(
+            'razao_social',
+            'ilike',
+            `%${JSON.parse(localParams.company_issuer).value}%`
+          )
+        })
+      })
+      .if(JSON.parse(localParams.client).value, (qryCompany) => {
+        qryCompany.whereHas('cliente', (qryContratos) => {
+          qryContratos.where('razao_social', 'ilike', `%${JSON.parse(localParams.client).value}%`)
+        })
+      })
+      .if(
+        JSON.parse(localParams.cofins).valueMin && JSON.parse(localParams.cofins).valueMax,
+        (subQuery) => {
+          subQuery.whereBetween('servico_valor_cofins', [
+            JSON.parse(localParams.cofins).valueMin,
+            JSON.parse(localParams.cofins).valueMax,
+          ])
+        }
+      )
+      .if(
+        JSON.parse(localParams.csll).valueMin && JSON.parse(localParams.csll).valueMax,
+        (subQuery) => {
+          subQuery.whereBetween('servico_valor_csll', [
+            JSON.parse(localParams.csll).valueMin,
+            JSON.parse(localParams.csll).valueMax,
+          ])
+        }
+      )
+      .if(
+        JSON.parse(localParams.inss).valueMin && JSON.parse(localParams.inss).valueMax,
+        (subQuery) => {
+          subQuery.whereBetween('servico_valor_inss', [
+            JSON.parse(localParams.inss).valueMin,
+            JSON.parse(localParams.inss).valueMax,
+          ])
+        }
+      )
+      .if(
+        JSON.parse(localParams.ir).valueMin && JSON.parse(localParams.ir).valueMax,
+        (subQuery) => {
+          subQuery.whereBetween('servico_valor_ir', [
+            JSON.parse(localParams.ir).valueMin,
+            JSON.parse(localParams.ir).valueMax,
+          ])
+        }
+      )
+      .if(
+        JSON.parse(localParams.pis).valueMin && JSON.parse(localParams.pis).valueMax,
+        (subQuery) => {
+          subQuery.whereBetween('servico_valor_pis', [
+            JSON.parse(localParams.pis).valueMin,
+            JSON.parse(localParams.pis).valueMax,
+          ])
+        }
+      )
+      .if(
+        JSON.parse(localParams.iss).valueMin && JSON.parse(localParams.iss).valueMax,
+        (subQuery) => {
+          subQuery.whereBetween('aliquota_iss', [
+            JSON.parse(localParams.iss).valueMin,
+            JSON.parse(localParams.iss).valueMax,
+          ])
+        }
+      )
+      .if(
+        JSON.parse(localParams.amount).valueMin && JSON.parse(localParams.amount).valueMax,
+        (subQuery) => {
+          subQuery.whereBetween('valor_total', [
+            JSON.parse(localParams.amount).valueMin,
+            JSON.parse(localParams.amount).valueMax,
+          ])
+        }
+      )
+      .whereNull('deleted_at')
+      .orderBy(field, sort)
+      .paginate(page, rowsPerPage)
+
+    return response.ok(data)
+  }
+
+  public async create({ auth, response, request }: HttpContextContract): Promise<void> {
+    const data = request.body()
+    const codigo = await SequenceController.createNewCodigoNfse(auth, data.emissora.id)
+    const lote = await SequenceController.createNewCodigoNfseLote(auth, data.emissora.id)
+    const rps = await SequenceController.createNewCodigoNfseRps(auth, data.emissora.id)
+
+    const now = DateTime.local()
+    const createdAtNow = now.minus({ hours: 3 })
+
+    await Nfse.create({
+      codigo: codigo,
+      numero_lote: lote,
+      numero_rps: rps,
+      clienteId: data.cliente.id,
+      emissoraId: data.emissora.id,
+      servicoId: data.servico_tipo.id,
+      servico_descricao: data.servico.servico_descricao,
+      servico_iss_retido_fonte: data.servico.servico_iss_retido_fonte,
+      servico_valor_cofins: data.servico.servico_valor_cofins,
+      servico_valor_csll: data.servico.servico_valor_csll,
+      servico_valor_inss: data.servico.servico_valor_inss,
+      servico_valor_inss_porcentagem: data.servico.servico_valor_inss_porcentagem,
+      servico_valor_ir: data.servico.servico_valor_ir,
+      servico_valor_pis: data.servico.servico_valor_pis,
+      servico_valor_iss: data.servico.servico_valor_iss,
+      aliquota_iss: data.servico.aliquota_iss,
+      aliquota_iss_porcentagem: data.servico.aliquota_iss_porcentagem,
+      valor_deducoes: data.servico.valor_deducoes,
+      base_calculo: data.valor_total,
+      valor_total: data.valor_total,
+      observacao: data.observacao,
+      status: 'TEMPORARIO',
+      createdAt: createdAtNow,
+    }).then(async (nfse) => {
+      const dataReturn = {
+        id_nfse: nfse.id,
+        codigo: codigo,
+      }
+
+      return response.json(dataReturn)
+    })
+  }
+
+  public static async alterNfse(data) {
+    const query = await Nfse.query()
+      .where('codigo', data.nfeIdExterno)
+      .whereHas('emissora', (subQuery) => {
+        subQuery.where('id_cadastro_enotas', data.empresaId)
+      })
+      .whereNull('deleted_at')
+      .select('id')
+      .first()
+
+    if (!query) {
+      return false
+    }
+
+    const record = await Nfse.findOrFail(query.id)
+    record.status = data.nfeStatus.toUpperCase()
+    record.motivo = data.nfeMotivoStatus ? data.nfeMotivoStatus.toUpperCase() : null
+    record.pdf = data.nfeLinkPdf
+    await record.save()
+  }
+
+  public async submitNfse({ auth, response, request }: HttpContextContract): Promise<void> {
+    const data = request.body()
+    const endereco = data.cliente.endereco
+
+    const findCertificate = await NothosPrimeCertificado.query()
+      .where('empresa_id', data.emissora.id)
+      .first()
+
+    const item = {
+      idExterno: data.codigo,
+      numero_lote: data.numero_lote,
+      numero_rps: data.numero_rps,
+      ambienteEmissao: 'Homologacao',
+      enviarPorEmail: true,
+      identificacao: `${data.emissora.usuario_acesso_provedor_prefeitura} - ${data.emissora.senha_acesso_provedor_prefeitura} - ${data.emissora.token_acesso_provedor_prefeitura} - c${data.emissora.cnpj_cpf}.pfx - ${findCertificate?.password}`,
+      emissor: {
+        tipoPessoa: data.emissora.tipo,
+        indicadorContribuinteICMS: 'NaoContribuinte',
+        crt: 'crtSimplesNacional',
+        nome: data.emissora.razao_social,
+        email: data.emissora.email,
+        cpfCnpj: data.emissora.cnpj_cpf,
+        inscricaoMunicipal: data.emissora.im,
+        inscricaoEstadual: data.emissora.ie_rg,
+        cnae: data.emissora.cnae,
+        endereco: {
+          pais: 'BRASIL',
+          uf: data.emissora_endereco.uf,
+          uf_codigo: data.emissora_endereco.codigo_uf,
+          cidade_codigo: data.emissora_endereco.codigo_cidade,
+          cidade: data.emissora_endereco.cidade
+            ? data.emissora_endereco.cidade.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+            : '',
+          logradouro: data.emissora_endereco.logradouro
+            ? data.emissora_endereco.logradouro.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+            : '',
+          numero: data.emissora_endereco.numero,
+          complemento: data.emissora_endereco.complemento
+            ? data.emissora_endereco.complemento.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+            : '',
+          bairro: data.emissora_endereco.bairro
+            ? data.emissora_endereco.bairro.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+            : '',
+          cep: data.emissora_endereco.cep,
+        },
+      },
+      cliente: {
+        tipoPessoa: data.cliente.tipo,
+        indicadorContribuinteICMS: 'NaoContribuinte',
+        nome: data.cliente.razao_social,
+        email: data.cliente.email,
+        telefone: data.cliente.telefone,
+        cpfCnpj: data.cliente.cnpj_cpf,
+        inscricaoMunicipal: data.cliente.im,
+        inscricaoEstadual: data.cliente.ie_rg,
+        cnae: data.empresa.cnae,
+        endereco: {
+          pais: 'BRASIL',
+          uf: endereco.uf,
+          uf_codigo: endereco.codigo_uf,
+          cidade_codigo: endereco.codigo_cidade,
+          cidade: endereco.cidade
+            ? endereco.cidade.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+            : '',
+          logradouro: endereco.logradouro
+            ? endereco.logradouro.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+            : '',
+          numero: endereco.numero,
+          complemento: endereco.complemento
+            ? endereco.complemento.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+            : '',
+          bairro: endereco.bairro
+            ? endereco.bairro.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+            : '',
+          cep: endereco.cep,
+        },
+      },
+      servico: {
+        descricao: data.servico.servico_descricao,
+        issRetidoFonte: data.servico.servico_iss_retido_fonte,
+        valorCofins: data.servico.servico_valor_cofins,
+        valorCsll: data.servico.servico_valor_csll,
+        valorInss: data.servico.servico_valor_inss,
+        valorInssPorcentagem: data.servico.servico_valor_inss_porcentagem,
+        valorIr: data.servico.servico_valor_ir,
+        valorPis: data.servico.servico_valor_pis,
+        valorIss: data.servico.servico_valor_iss,
+        aliquotaIss: data.servico.aliquota_iss,
+        aliquotaIssPorcentagem: data.servico.aliquota_iss_porcentagem,
+        valorDeducoes: data.servico.valor_deducoes,
+        baseCalculo: data.servico.base_calculo,
+        servicoTipo: data.servico_tipo.nome,
+      },
+      valorLiqNFSe: data.valorLiqNFSe,
+      itemListaServico: data.itemListaServico,
+      codTribMunicipal: data.codTribMunicipal,
+      valorTotal: data.valor_total,
+      observacoes: data.observacao,
+    }
+
+    // const json = JSON.stringify(item)
+    // const fs = require('fs')
+    // fs.writeFileSync('data2.txt', json)
+
+    let options = {
+      method: 'post',
+      url: 'http://52.90.30.6:8000/api/nfe/createNfse',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      data: item,
+    }
+
+    console.log('aqui')
+
+    return await axios
+      .request(options)
+      .then(async (responseCreate) => {
+        console.log('chegou aqui')
+        console.log(responseCreate.data)
+        // Recuperando o resultado
+        const regexInformaFront = /<informaFront>(.*?)<\/informaFront>/
+        const matchInformaFront = responseCreate.data.match(regexInformaFront)
+        const conteudoInformaFront = matchInformaFront ? matchInformaFront[1] : null
+
+        // Recuperando o código do pdf
+        const regexCodVer = /<codVer>(.*?)<\/codVer>/
+        const matchCodVer = responseCreate.data.match(regexCodVer)
+        const conteudoCodVer = matchCodVer ? matchCodVer[1] : null
+
+        // Recuperando a data de emissão
+        const regexData = /<dtEmissao>(.*?)<\/dtEmissao>/
+        const matchData = responseCreate.data.match(regexData)
+        const conteudoData = matchData ? matchData[1] : null
+        // const partesData = conteudoData.split('-')
+        // const dia = parseInt(partesData[0])
+        // const mes = parseInt(partesData[1]) - 1
+        // const ano = 2000 + parseInt(partesData[2])
+        // const data2 = new Date(Date.UTC(ano, mes, dia))
+        // const formato = data2.toISOString()
+
+        console.log(conteudoData)
+
+        // Recuperando o protocolo
+        const regexProtocolo = /<protocolo>(.*?)<\/protocolo>/
+        const matchProtocolo = responseCreate.data.match(regexProtocolo)
+        const conteudoProtocolo = matchProtocolo ? matchProtocolo[1] : null
+
+        // Recuperando o xml
+        const startTag = '<CompNfse>'
+        const endTag = '</CompNfse>'
+        const regexPattern = `${startTag}(.*?)${endTag}`
+        const regex2 = new RegExp(regexPattern, 's')
+        const xmlContent = responseCreate.data.match(regex2)[1]
+
+        if (conteudoInformaFront === 'TRUE') {
+          const query = await Nfse.query()
+            .where('id', data.id)
+            .whereNull('deleted_at')
+            .select('id')
+            .first()
+
+          if (!query) {
+            return response.notFound('Registro não encontrado')
+          }
+
+          const record = await Nfse.findOrFail(query.id)
+          record.status = 'AUTORIZADA'
+          record.pdf = conteudoCodVer
+            ? `https://homol-notajoseense.sjc.sp.gov.br/notafiscal/qrCodeServlet?idMultiTenant=8&hash=${conteudoCodVer}`
+            : ''
+          record.xml = xmlContent
+          record.protocolo_lote = conteudoProtocolo
+          record.codigo_verificacao = conteudoCodVer
+          // record.data_emissao = formato
+          await record.save()
+          return response.ok(responseCreate.data)
+        } else {
+          const query = await Nfse.query()
+            .where('id', data.id)
+            .whereNull('deleted_at')
+            .select('id')
+            .first()
+
+          if (!query) {
+            return response.notFound('Registro não encontrado')
+          }
+          const record = await Nfse.findOrFail(query.id)
+          record.status = conteudoCodVer ? 'AUTORIZADA' : 'RECUSADA'
+          record.pdf = conteudoCodVer
+            ? `https://homol-notajoseense.sjc.sp.gov.br/notafiscal/qrCodeServlet?idMultiTenant=8&hash=${conteudoCodVer}`
+            : ''
+          record.xml = xmlContent ? xmlContent : ''
+          record.protocolo_lote = conteudoProtocolo ? conteudoProtocolo : ''
+          record.codigo_verificacao = conteudoCodVer ? conteudoCodVer : ''
+          // record.motivo = result
+          await record.save()
+          return response.ok(record)
+        }
+      })
+      .catch(async function (error) {
+        console.log(error)
+      })
+  }
+
+  public async show({ params, response }: HttpContextContract) {
+    const id = params.id
+    const data = await Nfse.query()
+      .where('id', id)
+      .preload('cliente', (subQuery) => {
+        subQuery
+          .preload('enderecos', (subQuery) => {
+            subQuery
+              .where('tipo_relacionamento', 'empresa')
+              .where('tipo', 'PRINCIPAL')
+              .whereNull('deleted_at')
+          })
+          .preload('contatos')
+      })
+      .preload('emissora', (subQuery) => {
+        subQuery.preload('enderecos', (subQuery) => {
+          subQuery
+            .where('tipo_relacionamento', 'empresa')
+            .where('tipo', 'PRINCIPAL')
+            .whereNull('deleted_at')
+        })
+      })
+      .preload('servico_tipo')
+      .first()
+
+    if (!data) {
+      return response.badRequest('OCORREU UM ERRO AO TENTAR ENCONTRAR A NOTA FISCAL')
+    }
+
+    return response.ok(data)
+  }
+
+  public async update({ response, request }: HttpContextContract): Promise<void> {
+    const data = request.body()
+    const nfse = await Nfse.findOrFail(data.id)
+
+    if (!nfse) {
+      return response.badRequest('REGISTRO NÃO ENCONTRADO')
+    }
+
+    if (nfse) {
+      nfse.emissoraId = data.emissora.id
+      nfse.clienteId = data.empresa.id
+      nfse.servicoId = data.servico_tipo.id
+      nfse.servico_descricao = data.servico.servico_descricao
+      nfse.servico_iss_retido_fonte = data.servico.servico_iss_retido_fonte
+      nfse.servico_valor_cofins = data.servico.servico_valor_cofins
+      nfse.servico_valor_csll = data.servico.servico_valor_csll
+      nfse.servico_valor_inss = data.servico.servico_valor_inss
+      nfse.servico_valor_inss_porcentagem = data.servico.servico_valor_inss_porcentagem
+        ? data.servico.servico_valor_inss_porcentagem
+        : 0
+      nfse.servico_valor_ir = data.servico.servico_valor_ir
+      nfse.servico_valor_pis = data.servico.servico_valor_pis
+      nfse.servico_valor_iss = data.servico.servico_valor_iss
+      nfse.aliquota_iss = data.servico.aliquota_iss
+      nfse.aliquota_iss_porcentagem = data.servico.aliquota_iss_porcentagem
+        ? data.servico.aliquota_iss_porcentagem
+        : 0
+      nfse.valor_deducoes = data.servico.valor_deducoes
+      nfse.base_calculo = data.servico.base_calculo
+      nfse.valor_total = data.valor_total
+      nfse.observacao = data.observacao
+      nfse.save()
+      return response.ok(true)
+    }
+  }
+
+  public async downloadPdf({ params, response }: HttpContextContract): Promise<void> {
+    const id = params.id
+    const upload = await Upload.query().where('id_fk', id).where('type', 'nfse').select('*').first()
+    const data = await Nfse.query().where('id', id).select('pdf', 'id').first()
+    if (upload) {
+      return response.ok(upload)
+    } else {
+      return response.ok(data)
+    }
+  }
+
+  public async consultNfse({ params, response, request }: HttpContextContract): Promise<void> {
+    const id = params.id
+    const data = request.body()
+
+    let options = {
+      method: 'post',
+      url: 'http://52.90.30.6:8000/api/nfe/consultarNfse',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      data: data,
+    }
+
+    return await axios
+      .request(options)
+      .then(async (responseCreate) => {
+        // Recuperando o resultado
+        const regexInformaFront = /<informaFront>(.*?)<\/informaFront>/
+        const matchInformaFront = responseCreate.data.match(regexInformaFront)
+        const conteudoInformaFront = matchInformaFront ? matchInformaFront[1] : null
+
+        // Recuperando o código do pdf
+        const regexCodVer = /<codVer>(.*?)<\/codVer>/
+        const matchCodVer = responseCreate.data.match(regexCodVer)
+        const conteudoCodVer = matchCodVer ? matchCodVer[1] : null
+
+        // Recuperando a data de emissão
+        const regexData = /<dtEmissao>(.*?)<\/dtEmissao>/
+        const matchData = responseCreate.data.match(regexData)
+        const conteudoData = matchData ? matchData[1] : null
+        // const partesData = conteudoData.split('-')
+        // const dia = parseInt(partesData[0])
+        // const mes = parseInt(partesData[1]) - 1
+        // const ano = 2000 + parseInt(partesData[2])
+        // const data2 = new Date(Date.UTC(ano, mes, dia))
+        // const formato = data2.toISOString()
+
+        console.log(conteudoData)
+
+        // Recuperando o protocolo
+        const regexProtocolo = /<protocolo>(.*?)<\/protocolo>/
+        const matchProtocolo = responseCreate.data.match(regexProtocolo)
+        const conteudoProtocolo = matchProtocolo ? matchProtocolo[1] : null
+
+        if (conteudoInformaFront === 'TRUE') {
+          const query = await Nfse.query()
+            .where('id', data.id)
+            .whereNull('deleted_at')
+            .select('id')
+            .first()
+
+          if (!query) {
+            return response.notFound('Registro não encontrado')
+          }
+
+          const record = await Nfse.findOrFail(query.id)
+          record.status = 'AUTORIZADA'
+          record.pdf = conteudoCodVer
+            ? `https://homol-notajoseense.sjc.sp.gov.br/notafiscal/qrCodeServlet?idMultiTenant=8&hash=${conteudoCodVer}`
+            : ''
+          record.protocolo_lote = conteudoProtocolo
+          record.codigo_verificacao = conteudoCodVer
+          // record.data_emissao = formato
+          await record.save()
+          return response.ok(responseCreate.data)
+        } else {
+          const query = await Nfse.query()
+            .where('id', id)
+            .whereNull('deleted_at')
+            .select('id')
+            .first()
+
+          if (!query) {
+            return response.notFound('Registro não encontrado')
+          }
+          const record = await Nfse.findOrFail(query.id)
+          record.status = 'RECUSADA'
+          await record.save()
+          return response.ok(record)
+        }
+      })
+      .catch(async function (error) {
+        console.log(error)
+      })
+  }
+}
